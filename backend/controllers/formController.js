@@ -1,39 +1,45 @@
 import cloudinary from '../config/cloudinary.js';
 import { query } from '../config/db.js';
 
-const uploadPDF = async (req, res, next) => {
-  try {
-    if (!req.cloudinaryResults || !req.cloudinaryResults.resume) {
-      return res.status(400).json({ error: 'Resume file upload failed' });
+// Controller for handling PDF and form upload
+export const handleFormUpload = async (req, res) => {
+  if (!req.files || !req.files.resume) {
+    return res.status(400).json({ status: 'ERROR', message: 'Resume file is required.' });
+  }
+  // Parse form data
+  let formData = {};
+  if (req.body.data) {
+    try {
+      formData = JSON.parse(req.body.data);
+    } catch (e) {
+      return res.status(400).json({ status: 'ERROR', message: 'Invalid form data.' });
     }
+  }
 
-    // Process form data
-    const formData = JSON.parse(req.body.data);
+  // Build file URLs
+  const protocol = req.protocol;
+  const host = req.get('host');
+  const resumeUrl = `${protocol}://${host}/uploads/${req.files.resume[0].filename}`;
+  const academicsUrl = req.files.academics ? `${protocol}://${host}/uploads/${req.files.academics[0].filename}` : null;
 
-    // Validate numeric fields
-    const validateNumericField = (value, fieldName, maxValue, precision) => {
-      if (!value || value.trim() === '') return null; // Allow empty values to be null
-      const num = parseFloat(value);
-      if (isNaN(num)) {
-        throw new Error(`Invalid ${fieldName}: must be a valid number`);
-      }
-      if (num > maxValue) {
-        throw new Error(`${fieldName} exceeds maximum allowed value (${maxValue})`);
-      }
-      // Round to specified precision (e.g., 2 decimal places)
-      return Number(num.toFixed(precision));
-    };
+  // Validate numeric fields
+  const validateNumericField = (value, fieldName, maxValue, precision) => {
+    if (!value || value.trim() === '') return null;
+    const num = parseFloat(value);
+    if (isNaN(num)) {
+      throw new Error(`Invalid ${fieldName}: must be a valid number`);
+    }
+    if (num > maxValue) {
+      throw new Error(`${fieldName} exceeds maximum allowed value (${maxValue})`);
+    }
+    return Number(num.toFixed(precision));
+  };
 
-    // Validate aggregate_marks (e.g., max 100.00 for grades/CGPA)
+  try {
     const marks = validateNumericField(formData.marks, 'Aggregate Marks/CGPA', 100, 2);
+    const ctc = validateNumericField(formData.expectedCTC, 'Expected CTC', 11111111111, 2);
 
-    // Validate expected_ctc (e.g., max 9999999.99 for CTC in lakhs)
-    const ctc = validateNumericField(formData.expectedCTC, 'Expected CTC', 9999999.99, 2);
-
-    // Begin transaction
     await query('START TRANSACTION');
-
-    // Insert into Candidates table
     const candidateQuery = `
       INSERT INTO Candidates (
         full_name, date_of_birth, gender, mobile_number, alternate_contact_number, email,
@@ -46,30 +52,26 @@ const uploadPDF = async (req, res, next) => {
         resume_path, academic_docs_path, aadhar_number, pan_no, passport_available,
         certificate_name
       ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
     `;
-
     const candidateValues = [
       formData.fullName,
       formData.dob,
-      formData.gender.toLowerCase(),
+      formData.gender ? formData.gender.toLowerCase() : null,
       formData.mobile,
       formData.altMobile || null,
       formData.email,
       formData.currentCity,
       formData.homeTown,
       formData.willingToRelocate === 'Yes',
-      formData.preferredLocations.join(', '),
+      formData.preferredLocations ? formData.preferredLocations.join(', ') : null,
       formData.qualification,
       formData.course,
       formData.college,
       formData.affiliatedUniv || null,
       formData.graduationYear,
-      marks, // Use validated marks
+      marks,
       formData.allSemCleared === 'Yes',
       formData.hasInternship === 'Yes',
       formData.projectDesc || null,
@@ -78,20 +80,19 @@ const uploadPDF = async (req, res, next) => {
       formData.preferredRole,
       formData.joining,
       formData.shifts === 'Yes',
-      ctc, // Use validated CTC
+      ctc,
       formData.source,
       formData.onlineTest === 'Yes',
       formData.laptop === 'Yes',
-      req.cloudinaryResults.resume.secure_url,
-      req.cloudinaryResults.academics ? req.cloudinaryResults.academics.secure_url : null,
+      resumeUrl,
+      academicsUrl,
       formData.aadhar || null,
       formData.pan || null,
       !!formData.passport,
       formData.certifications || null
     ];
-
-    const candidateResult = await query(candidateQuery, candidateValues);
-    const candidateId = candidateResult.insertId;
+    const result = await query(candidateQuery, candidateValues);
+    const candidateId = result.insertId;
 
     // Insert skills
     if (formData.techSkills && formData.techSkills.length > 0) {
@@ -128,29 +129,16 @@ const uploadPDF = async (req, res, next) => {
       }
     }
 
-    // Commit transaction
     await query('COMMIT');
-
     res.status(201).json({
       success: true,
       candidateId,
-      resumeUrl: req.cloudinaryResults.resume.secure_url
+      resumeUrl,
+      academicsUrl
     });
-
   } catch (error) {
-    // Rollback transaction on error
     await query('ROLLBACK');
     console.error('Error submitting form:', error);
-
-    // Delete uploaded files if transaction failed
-    if (req.cloudinaryResults && req.cloudinaryResults.resume) {
-      try {
-        await cloudinary.uploader.destroy(req.cloudinaryResults.resume.public_id);
-      } catch (e) {
-        console.error('Error cleaning up uploaded file:', e);
-      }
-    }
-
     res.status(500).json({
       error: 'Failed to submit form',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -460,4 +448,83 @@ const getAllCandidates = async (req, res) => {
 };
 
 
-export { uploadPDF, getCandidateInfo, getAllCandidates};
+// Controller to get candidate by ID
+export const getCandidateById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!id || isNaN(parseInt(id))) {
+      return res.status(400).json({ error: 'Invalid candidate ID' });
+    }
+    
+    // Get candidate details
+    const candidateQuery = `
+      SELECT 
+        c.candidate_id,
+        c.full_name,
+        c.email,
+        c.mobile_number,
+        c.current_city,
+        c.highest_qualification,
+        c.course_name,
+        c.college_university,
+        c.year_of_passing,
+        c.aggregate_marks,
+        c.preferred_role,
+        c.expected_ctc,
+        c.resume_path,
+        c.academic_docs_path,
+        c.created_at,
+        c.updated_at,
+        GROUP_CONCAT(DISTINCT cs.skill_name) as skills,
+        GROUP_CONCAT(DISTINCT cpl.job_location) as preferred_locations,
+        GROUP_CONCAT(DISTINCT clk.language_name) as languages
+      FROM Candidates c
+      LEFT JOIN Candidate_skills cs ON c.candidate_id = cs.candidate_id
+      LEFT JOIN candidate_preferred_job_location cpl ON c.candidate_id = cpl.candidate_id
+      LEFT JOIN candidate_languages_known clk ON c.candidate_id = clk.candidate_id
+      WHERE c.candidate_id = ?
+      GROUP BY c.candidate_id
+    `;
+    
+    const candidates = await query(candidateQuery, [id]);
+    
+    if (candidates.length === 0) {
+      return res.status(404).json({ error: 'Candidate not found' });
+    }
+    
+    const candidate = candidates[0];
+    const processedCandidate = {
+      id: candidate.candidate_id,
+      fullName: candidate.full_name,
+      email: candidate.email,
+      mobileNumber: candidate.mobile_number,
+      currentCity: candidate.current_city,
+      highestQualification: candidate.highest_qualification,
+      courseName: candidate.course_name,
+      collegeUniversity: candidate.college_university,
+      yearOfPassing: candidate.year_of_passing,
+      aggregateMarks: candidate.aggregate_marks,
+      preferredRole: candidate.preferred_role,
+      expectedCTC: candidate.expected_ctc,
+      resumePath: candidate.resume_path,
+      academicDocsPath: candidate.academic_docs_path,
+      createdAt: candidate.created_at,
+      updatedAt: candidate.updated_at,
+      skills: candidate.skills ? candidate.skills.split(',') : [],
+      preferredLocations: candidate.preferred_locations ? candidate.preferred_locations.split(',') : [],
+      languages: candidate.languages ? candidate.languages.split(',') : []
+    };
+    
+    res.json(processedCandidate);
+    
+  } catch (error) {
+    console.error('Error fetching candidate:', error);
+    res.status(500).json({
+      error: 'Failed to fetch candidate',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+export { getCandidateInfo, getAllCandidates };

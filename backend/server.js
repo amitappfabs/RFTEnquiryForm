@@ -19,15 +19,30 @@ const app = express();
 // ======================
 // Middleware Setup
 // ======================
-app.use(cors({
-  origin: [
-    process.env.FRONTEND_URL || 'http://localhost:5173',
-    'https://*.railway.app',
-    /railway\.app$/,
+// Parse multiple frontend URLs from environment variable
+const getFrontendUrls = () => {
+  const urls = [
+    'http://localhost:5173', // Development
     'https://*.vercel.app',
     /vercel\.app$/,
-    'https://ruhilfuturetech.vercel.app'
-  ],
+    'https://*.railway.app',
+    /railway\.app$/,
+    'https://www.rftsystems.com', // Your custom domain
+    'https://ruhilfuturetech.vercel.app',
+    'https://ruhilfuturetech-3s9l628yv-meow-c620ed4a.vercel.app/',
+  ];
+  
+  // Add URLs from environment variable if provided
+  if (process.env.FRONTEND_URL) {
+    const envUrls = process.env.FRONTEND_URL.split(',').map(url => url.trim());
+    urls.push(...envUrls);
+  }
+  
+  return urls;
+};
+
+app.use(cors({
+  origin: getFrontendUrls(),
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true,
   allowedHeaders: ['Content-Type', 'Authorization']
